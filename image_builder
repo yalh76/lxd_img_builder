@@ -1,5 +1,9 @@
 #!/bin/bash
 
+cd $(dirname $(realpath $0))
+source "./lib/common.sh"
+source "./lib/lxc.sh"
+
 function get_arch()
 {
     local architecture
@@ -30,7 +34,7 @@ function rotate_image()
     if [ "$(lxc info $instance_to_publish | grep Status | awk '{print tolower($2)}')" = "running" ]
     then
         should_restart=1
-        lxc stop "$instance_to_publish"
+        LXC_STOP "$instance_to_publish"
     fi
 
     # Create image before install
@@ -40,7 +44,7 @@ function rotate_image()
 
     if [ $should_restart = 1 ]
     then
-        lxc start "$instance_to_publish"
+        _LXC_START_AND_WAIT "$instance_to_publish"
         sleep 5
     fi
 }
@@ -53,7 +57,8 @@ function rebuild_base_lxc()
     local img_name=$YNH_BRANCH-$DIST-$ARCH
     
     set -x
-    lxc info $img_name >/dev/null && lxc delete $img_name --force
+    LXC_NAME=$img_name
+    lxc info $img_name >/dev/null && LXC_RESET
 
     if [ $(get_arch) = $ARCH ];
     then
@@ -76,26 +81,26 @@ function rebuild_base_lxc()
 
         lxc launch $img_name $img_name -c security.privileged=true -c security.nesting=true
     fi
-    sleep 5
+    sleep 30
     
-    IN_LXC="lxc exec $img_name --"
+    LXC_NAME=$img_name
     
     local INSTALL_SCRIPT="https://install.yunohost.org/$DIST"
 
-    $IN_LXC apt install curl -y
-    $IN_LXC /bin/bash -c "echo exit 101 > /usr/sbin/policy-rc.d"
-    $IN_LXC /bin/bash -c "chmod +x /usr/sbin/policy-rc.d"
-    $IN_LXC /bin/bash -c "curl $INSTALL_SCRIPT | bash -s -- -a -d $YNH_BRANCH"
-    $IN_LXC /bin/bash -c "rm /usr/sbin/policy-rc.d"
+    RUN_INSIDE_LXC apt install curl -y
+    RUN_INSIDE_LXC /bin/bash -c "echo exit 101 > /usr/sbin/policy-rc.d"
+    RUN_INSIDE_LXC /bin/bash -c "chmod +x /usr/sbin/policy-rc.d"
+    RUN_INSIDE_LXC /bin/bash -c "curl $INSTALL_SCRIPT | bash -s -- -a -d $YNH_BRANCH"
+    RUN_INSIDE_LXC /bin/bash -c "rm /usr/sbin/policy-rc.d"
  
-    $IN_LXC systemctl -q disable apt-daily.timer
-    $IN_LXC systemctl -q disable apt-daily-upgrade.timer
-    $IN_LXC systemctl -q disable apt-daily.service
-    $IN_LXC systemctl -q disable apt-daily-upgrade.service
-    $IN_LXC rm -f /etc/cron.daily/apt-compat
-    $IN_LXC cp /bin/true /usr/lib/apt/apt.systemd.daily
-    $IN_LXC /bin/bash -c "reboot 0"
-    sleep 5
+    RUN_INSIDE_LXC systemctl -q disable apt-daily.timer
+    RUN_INSIDE_LXC systemctl -q disable apt-daily-upgrade.timer
+    RUN_INSIDE_LXC systemctl -q disable apt-daily.service
+    RUN_INSIDE_LXC systemctl -q disable apt-daily-upgrade.service
+    RUN_INSIDE_LXC rm -f /etc/cron.daily/apt-compat
+    RUN_INSIDE_LXC cp /bin/true /usr/lib/apt/apt.systemd.daily
+    RUN_INSIDE_LXC /bin/bash -c "reboot 0"
+    _LXC_START_AND_WAIT $img_name
 
     # Publish ynh-dev image
     local LXC_BASE="ynh-dev-$DIST-$ARCH-$YNH_BRANCH-base"
@@ -107,21 +112,21 @@ function rebuild_base_lxc()
     local TEST_USER="package_checker"
 
     # Disable password strength check
-    $IN_LXC yunohost tools postinstall --domain $DOMAIN --password $YUNO_PWD --force-password
+    RUN_INSIDE_LXC yunohost tools postinstall --domain $DOMAIN --password $YUNO_PWD --force-password
 
-    $IN_LXC yunohost settings set security.password.admin.strength -v -1
-    $IN_LXC yunohost settings set security.password.user.strength -v -1
+    RUN_INSIDE_LXC yunohost settings set security.password.admin.strength -v -1
+    RUN_INSIDE_LXC yunohost settings set security.password.user.strength -v -1
 
-    $IN_LXC yunohost domain add $SUBDOMAIN
+    RUN_INSIDE_LXC yunohost domain add $SUBDOMAIN
     TEST_USER_DISPLAY=${TEST_USER//"_"/""}
-    $IN_LXC yunohost user create $TEST_USER --firstname $TEST_USER_DISPLAY --lastname $TEST_USER_DISPLAY --domain $DOMAIN --password "$YUNO_PWD"
+    RUN_INSIDE_LXC yunohost user create $TEST_USER --firstname $TEST_USER_DISPLAY --lastname $TEST_USER_DISPLAY --domain $DOMAIN --password "$YUNO_PWD"
 
-    $IN_LXC "yunohost --version"
+    RUN_INSIDE_LXC "yunohost --version"
 
     LXC_BASE="ynh-appci-$DIST-$ARCH-$YNH_BRANCH-base"
-    lxc stop $img_name
+    LXC_STOP $img_name
     rotate_image $img_name $LXC_BASE "os=YunoHost" "ynh-release=$YNH_BRANCH" "stage=ynh-appci" "release=${DIST^}" "architecture=$ARCH" "description=YunoHost $DIST $YNH_BRANCH ynh-appci $ARCH ($(date '+%Y%m%d'))"
-    lxc delete $img_name
+    LXC_RESET $img_name
     set +x
 }
 
@@ -140,33 +145,33 @@ function from_stable_to_another_version()
 	fi
 
     set -x
-    IN_LXC="lxc exec $NEW_LXC_BASE --"
+    LXC_NAME="$NEW_LXC_BASE"
 
     lxc launch $OLD_LXC_BASE $NEW_LXC_BASE -c security.privileged=true -c security.nesting=true
-    sleep 5
+    _LXC_START_AND_WAIT $NEW_LXC_BASE
 
-    $IN_LXC /bin/bash -c "echo deb http://forge.yunohost.org/debian/ $DIST stable $source > /etc/apt/sources.list.d/yunohost.list"
-    $IN_LXC /bin/bash -c "apt-get update"
-    $IN_LXC /bin/bash -c "apt-get dist-upgrade -y"
+    RUN_INSIDE_LXC /bin/bash -c "echo deb http://forge.yunohost.org/debian/ $DIST stable $source > /etc/apt/sources.list.d/yunohost.list"
+    RUN_INSIDE_LXC /bin/bash -c "apt-get update"
+    RUN_INSIDE_LXC /bin/bash -c "apt-get dist-upgrade -y"
 
-    lxc stop $NEW_LXC_BASE
+    LXC_STOP $NEW_LXC_BASE
     rotate_image $NEW_LXC_BASE $NEW_LXC_BASE "os=YunoHost" "ynh-release=$YNH_BRANCH" "stage=ynh-dev" "release=${DIST^}" "architecture=$ARCH" "description=YunoHost $DIST $YNH_BRANCH ynh-dev $ARCH ($(date '+%Y%m%d'))"
-    lxc delete $NEW_LXC_BASE
+    LXC_RESET $NEW_LXC_BASE
 
     OLD_LXC_BASE="ynh-appci-$DIST-$ARCH-stable-base"
     NEW_LXC_BASE="ynh-appci-$DIST-$ARCH-$YNH_BRANCH-base"
-    IN_LXC="lxc exec $NEW_LXC_BASE --"
+    LXC_NAME="$NEW_LXC_BASE"
 
     lxc launch $OLD_LXC_BASE $NEW_LXC_BASE -c security.privileged=true -c security.nesting=true
-    sleep 5
+    _LXC_START_AND_WAIT $NEW_LXC_BASE
 
-    $IN_LXC /bin/bash -c "echo deb http://forge.yunohost.org/debian/ $DIST stable $source > /etc/apt/sources.list.d/yunohost.list"
-    $IN_LXC /bin/bash -c "apt-get update"
-    $IN_LXC /bin/bash -c "apt-get dist-upgrade -y"
+    RUN_INSIDE_LXC /bin/bash -c "echo deb http://forge.yunohost.org/debian/ $DIST stable $source > /etc/apt/sources.list.d/yunohost.list"
+    RUN_INSIDE_LXC /bin/bash -c "apt-get update"
+    RUN_INSIDE_LXC /bin/bash -c "apt-get dist-upgrade -y"
     
-    lxc stop $NEW_LXC_BASE
+    LXC_STOP $NEW_LXC_BASE
     rotate_image $NEW_LXC_BASE $NEW_LXC_BASE "os=YunoHost" "ynh-release=$YNH_BRANCH" "stage=ynh-appci" "release=${DIST^}" "architecture=$ARCH" "description=YunoHost $DIST $YNH_BRANCH ynh-appci $ARCH ($(date '+%Y%m%d'))"
-    lxc delete $NEW_LXC_BASE
+    LXC_RESET $NEW_LXC_BASE
     set +x
 }
 
